@@ -3,6 +3,7 @@ import { Audio } from 'expo-av';
 import LiveAudioStream from 'react-native-live-audio-stream';
 import { UserSettings, EyeState, UserLocation, AppMode } from "../types";
 import { wrapPcmWithWav } from "../utils/audioUtils";
+import { Buffer } from 'buffer';
 
 // Audio Config
 const SAMPLE_RATE = 16000;
@@ -111,12 +112,14 @@ export class LiveService {
     private calculateVolume(base64: string) {
         // Crude RMS calculation for visualization
         // Taking a subset to save CPU
-        const raw = atob(base64);
+        const buffer = Buffer.from(base64, 'base64');
         let sum = 0;
-        const step = 4; // Skip bytes for speed
-        for (let i = 0; i < raw.length; i += step) {
-            const char = raw.charCodeAt(i);
-            sum += char * char;
+        const step = 4;
+        // Buffer trong Node/RN truy cập bằng index như mảng byte
+        for (let i = 0; i < buffer.length; i += step) {
+            const byte = buffer[i];
+            // Lưu ý: PCM 16bit là 2 bytes, tính toán trên 1 byte chỉ là ước lượng biên độ
+            sum += byte * byte;
         }
         const rms = Math.sqrt(sum / (raw.length / step));
         const normalized = Math.min(Math.max(rms / 10, 0), 100);

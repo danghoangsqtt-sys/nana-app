@@ -11,6 +11,9 @@
       "resizeMode": "contain",
       "backgroundColor": "#000000"
     },
+    "extra": {
+      "geminiApiKey": "AIzaSyDZiOlUqiVZehmx7UMcR5lcOKiHRim8qAI" // Hoặc dùng process.env
+    },
     "assetBundlePatterns": [
       "**/*"
     ],
