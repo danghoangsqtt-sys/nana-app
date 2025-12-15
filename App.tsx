@@ -8,8 +8,8 @@ import Eyes from './components/Eyes';
 import Mouth from './components/Mouth';
 import TranscriptView from './components/TranscriptView';
 import SettingsModal from './components/SettingsModal';
-import { UserSettings, EyeState, Emotion } from './types';
-import { Sparkles, Settings2 } from 'lucide-react-native';
+import { UserSettings, EyeState, Emotion, AppMode } from './types';
+import { Sparkles, Settings2, Languages, Mic, MicOff } from 'lucide-react-native';
 
 const API_KEY = Constants.expoConfig?.extra?.geminiApiKey || '';
 
@@ -18,8 +18,8 @@ const DEFAULT_SETTINGS: UserSettings = {
     systemInstruction: 'You are NaNa, a helpful, witty, and concise AI assistant.',
     fileContext: '',
     language: 'en',
-    translationLangA: 'vi',
-    translationLangB: 'en',
+    translationLangA: 'English',
+    translationLangB: 'Vietnamese',
     apiKey: API_KEY,
     voiceSensitivity: 1.5,
 };
@@ -28,6 +28,7 @@ const App: React.FC = () => {
     const [settings, setSettings] = useState<UserSettings>(DEFAULT_SETTINGS);
     const [showSettings, setShowSettings] = useState(false);
     const [currentTime, setCurrentTime] = useState(new Date());
+    const [mode, setMode] = useState<AppMode>('assistant');
 
     const {
         state,
@@ -39,7 +40,7 @@ const App: React.FC = () => {
         messages,
         currentTranscript,
         isUserSpeaking
-    } = useGeminiLive(settings, null);
+    } = useGeminiLive(settings, null, mode);
 
     useEffect(() => {
         const timer = setInterval(() => setCurrentTime(new Date()), 1000);
@@ -62,6 +63,14 @@ const App: React.FC = () => {
         else connect();
     };
 
+    const handleModeSwitch = () => {
+        if (active) {
+            Alert.alert("End Session", "Please end the current session before switching modes.");
+            return;
+        }
+        setMode(prev => prev === 'assistant' ? 'translator' : 'assistant');
+    };
+
     const hours = currentTime.getHours().toString().padStart(2, '0');
     const minutes = currentTime.getMinutes().toString().padStart(2, '0');
 
@@ -69,10 +78,15 @@ const App: React.FC = () => {
     if (state === EyeState.SPEAKING) currentEmotion = Emotion.HAPPY;
     if (state === EyeState.THINKING) currentEmotion = Emotion.SURPRISED;
 
+    const isTranslator = mode === 'translator';
+    const themeColor = isTranslator ? 'text-sky-400' : 'text-purple-400';
+    const glowColor = isTranslator ? 'bg-sky-600/30' : 'bg-purple-600/30';
+    const borderColor = isTranslator ? 'border-sky-400/30' : 'border-purple-400/30';
+
     return (
         <SafeAreaProvider>
             <LinearGradient
-                colors={['#0f0c29', '#302b63', '#24243e']}
+                colors={isTranslator ? ['#0f172a', '#1e293b', '#0c4a6e'] : ['#0f0c29', '#302b63', '#24243e']}
                 style={{ flex: 1 }}
             >
                 <StatusBar barStyle="light-content" />
@@ -81,22 +95,32 @@ const App: React.FC = () => {
                     {/* Header */}
                     <View className="flex-row justify-between items-center px-6 mt-2">
                         <View>
-                            <Text className="text-white text-4xl font-thin tracking-widest">
-                                {hours}<Text className="text-purple-400">:</Text>{minutes}
+                            <Text className="text-white text-4xl font-thin tracking-[3px]">
+                                {hours}<Text className={themeColor}>:</Text>{minutes}
                             </Text>
-                            <Text className="text-purple-200/50 text-xs uppercase tracking-[0.4em]">NaNa AI</Text>
+                            <Text className="text-white/50 text-xs uppercase tracking-[5px]">
+                                {isTranslator ? "TRANSLATOR" : "NaNa AI"}
+                            </Text>
                         </View>
-                        <TouchableOpacity
-                            onPress={() => setShowSettings(true)}
-                            className="p-3 bg-white/10 rounded-full border border-white/10"
-                        >
-                            <Settings2 size={20} color="white" />
-                        </TouchableOpacity>
+                        <View className="flex-row gap-3">
+                            <TouchableOpacity
+                                onPress={handleModeSwitch}
+                                className={`p-3 rounded-full border ${isTranslator ? 'bg-sky-500/20 border-sky-400/30' : 'bg-white/10 border-white/10'}`}
+                            >
+                                {isTranslator ? <Languages size={20} color="#38bdf8" /> : <Sparkles size={20} color="white" />}
+                            </TouchableOpacity>
+                            <TouchableOpacity
+                                onPress={() => setShowSettings(true)}
+                                className="p-3 bg-white/10 rounded-full border border-white/10"
+                            >
+                                <Settings2 size={20} color="white" />
+                            </TouchableOpacity>
+                        </View>
                     </View>
 
                     {/* Avatar Section */}
                     <View className="items-center justify-center flex-1 my-4">
-                        <View className={`absolute w-80 h-80 rounded-full bg-purple-600/30 blur-3xl ${active ? 'opacity-100' : 'opacity-20'}`} />
+                        <View className={`absolute w-80 h-80 rounded-full blur-3xl ${glowColor} ${active ? 'opacity-100' : 'opacity-20'}`} />
 
                         <View className="scale-110">
                             <Eyes state={state} emotion={currentEmotion} volume={volume} />
@@ -104,47 +128,32 @@ const App: React.FC = () => {
                         </View>
 
                         {/* Status Pill */}
-                        <View className={`mt-8 px-5 py-2 rounded-full border flex-row items-center gap-2 ${active ? 'border-purple-400/30 bg-purple-900/40' : 'border-white/10 bg-black/40'}`}>
-                            <View className={`w-2 h-2 rounded-full ${active ? 'bg-green-400 animate-pulse' : 'bg-neutral-500'}`} />
-                            <Text className={`text-xs uppercase tracking-widest font-semibold ${active ? 'text-purple-100' : 'text-neutral-500'}`}>
-                                {active ? (state === EyeState.LISTENING ? "Listening" : state) : "Standby"}
+                        <View className={`mt-8 px-5 py-2 rounded-full border flex-row items-center gap-2 ${active ? borderColor + ' bg-black/40' : 'border-white/10 bg-black/20'}`}>
+                            <View className={`w-2 h-2 rounded-full ${active ? (isTranslator ? 'bg-sky-400' : 'bg-green-400') : 'bg-red-500'}`} />
+                            <Text className="text-white/80 text-xs font-medium uppercase tracking-widest">
+                                {active ? (isTranslator ? `Trans: ${settings.translationLangA} ↔ ${settings.translationLangB}` : state) : "OFFLINE"}
                             </Text>
                         </View>
                     </View>
 
-                    {/* Transcript Area */}
-                    {active && (messages.length > 0 || currentTranscript) ? (
-                        <View className="h-1/3 w-full">
-                            <TranscriptView
-                                messages={messages}
-                                currentTranscript={currentTranscript}
-                                isUserSpeaking={isUserSpeaking}
-                            />
-                        </View>
-                    ) : <View className="h-1/3" />}
+                    {/* Transcript & Controls */}
+                    <View className="h-1/3 w-full justify-end pb-6">
+                        <TranscriptView
+                            messages={messages}
+                            currentTranscript={currentTranscript}
+                            isUserSpeaking={isUserSpeaking}
+                        />
 
-                    {/* Bottom Controls */}
-                    <View className="px-8 mb-6 w-full">
-                        <TouchableOpacity
-                            onPress={handleToggle}
-                            activeOpacity={0.8}
-                            className={`w-full py-5 rounded-3xl flex-row items-center justify-center gap-3 shadow-2xl ${active
-                                    ? 'bg-neutral-900 border border-white/10'
-                                    : 'bg-white'
-                                }`}
-                        >
-                            {active ? (
-                                <View className="w-4 h-4 rounded-sm bg-red-500" />
-                            ) : (
-                                <Sparkles size={24} color="#9333ea" />
-                            )}
-                            <Text className={`font-bold text-lg tracking-wider uppercase ${active ? 'text-white' : 'text-purple-900'}`}>
-                                {active ? "End Session" : "Start Conversation"}
-                            </Text>
-                        </TouchableOpacity>
+                        <View className="items-center px-6">
+                            <TouchableOpacity
+                                onPress={handleToggle}
+                                className={`w-20 h-20 rounded-full items-center justify-center shadow-2xl border-4 ${active ? (isTranslator ? 'bg-sky-500 border-sky-400 shadow-sky-500/50' : 'bg-purple-600 border-purple-400 shadow-purple-500/50') : 'bg-neutral-800 border-neutral-700'}`}
+                            >
+                                {active ? <Mic size={32} color="white" /> : <MicOff size={32} color="#666" />}
+                            </TouchableOpacity>
+                        </View>
                     </View>
 
-                    {/* Settings Modal */}
                     <SettingsModal
                         visible={showSettings}
                         onClose={() => setShowSettings(false)}

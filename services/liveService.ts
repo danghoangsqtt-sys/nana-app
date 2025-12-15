@@ -2,33 +2,34 @@ import { GoogleGenAI, LiveServerMessage, Modality } from "@google/genai";
 import { Audio } from 'expo-av';
 import LiveAudioStream from 'react-native-live-audio-stream';
 import { UserSettings, EyeState, UserLocation, AppMode } from "../types";
-import { wrapPcmWithWav } from "../utils/audioUtils";
-import { Buffer } from 'buffer';
+import { wrapPcmWithWav, atob } from "../utils/audioUtils";
 
 // Audio Config
 const SAMPLE_RATE = 16000;
 const CHANNELS = 1;
 const BIT_DEPTH = 16;
-const BUFFER_SIZE = 2048; // Size of emitted chunks
+const BUFFER_SIZE = 4096; // Increased buffer for stability
 
 export class LiveService {
     private ai: GoogleGenAI;
-    private session: any = null;
+    private connectionPromise: Promise<any> | null = null;
+    private streamSubscription: any = null;
 
-    // Audio Playback
+    // Audio Playback State
     private isPlaying = false;
-    private audioQueue: string[] = []; // Queue of base64 PCM chunks
+    private audioQueue: string[] = [];
     private currentSound: Audio.Sound | null = null;
-    private nextSound: Audio.Sound | null = null; // Pre-loaded sound
+    private nextSound: Audio.Sound | null = null; // Pre-loaded buffer
+    private voiceSensitivity: number = 1.5;
 
-    // State Management
+    // Callbacks
     public onStateChange: (state: EyeState) => void = () => { };
     public onTranscript: (text: string, isUser: boolean, isFinal: boolean) => void = () => { };
     public onError: (message: string) => void = () => { };
     public onDisconnect: () => void = () => { };
     public onVolumeChange: (volume: number) => void = () => { };
 
-    // Transcription State
+    // Internal Transcription State
     private currentInputTranscription = '';
     private currentOutputTranscription = '';
 
@@ -38,6 +39,9 @@ export class LiveService {
 
     async connect(settings: UserSettings, location: UserLocation | null, mode: AppMode) {
         try {
+            this.voiceSensitivity = settings.voiceSensitivity ?? 1.5;
+
+            // 1. Setup Audio Mode
             await Audio.setAudioModeAsync({
                 allowsRecordingIOS: true,
                 playsInSilentModeIOS: true,
@@ -46,24 +50,42 @@ export class LiveService {
                 playThroughEarpieceAndroid: false,
             });
 
-            // Initialize Input Stream
+            // 2. Initialize Microphone Stream
+            // Changed audioSource from 6 (VOICE_RECOGNITION) to 1 (MIC) for better compatibility
             const options = {
                 sampleRate: SAMPLE_RATE,
                 channels: CHANNELS,
                 bitsPerSample: BIT_DEPTH,
-                audioSource: 6, // Voice Recognition
+                audioSource: 1,
                 bufferSize: BUFFER_SIZE,
+                wavFile: 'temp.wav'
             };
             LiveAudioStream.init(options);
 
-            // Gemini Config
+            // 3. Determine System Instruction based on Mode
+            let systemInstruction = settings.systemInstruction || "You are NaNa, a helpful AI.";
+
+            if (mode === 'translator') {
+                const langA = settings.translationLangA || 'English';
+                const langB = settings.translationLangB || 'Spanish';
+                systemInstruction = `You are a professional, real-time bi-directional interpreter. 
+            Your task is to translate spoken audio strictly between ${langA} and ${langB}.
+            
+            Rules:
+            1. If you hear ${langA}, translate it immediately to ${langB}.
+            2. If you hear ${langB}, translate it immediately to ${langA}.
+            3. Do not answer questions, do not have a conversation, and do not add filler words like "Sure" or "Here is the translation".
+            4. Output ONLY the translated spoken audio.`;
+            }
+
+            // 4. Configure Gemini Live Session
             const config: any = {
                 model: 'gemini-2.5-flash-native-audio-preview-09-2025',
                 config: {
                     responseModalities: [Modality.AUDIO],
-                    inputAudioTranscription: { model: "google-1.0-pro-en" },
-                    outputAudioTranscription: { model: "google-1.0-pro-en" },
-                    systemInstruction: settings.systemInstruction || "You are NaNa.",
+                    inputAudioTranscription: {},
+                    outputAudioTranscription: {},
+                    systemInstruction: systemInstruction,
                     speechConfig: {
                         voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Zephyr' } }
                     },
@@ -72,14 +94,19 @@ export class LiveService {
                     onopen: this.handleOpen.bind(this),
                     onmessage: this.handleMessage.bind(this),
                     onclose: () => {
+                        console.log("Session closed");
                         this.cleanup();
                         this.onDisconnect();
                     },
-                    onerror: (e: any) => this.onError(e.message || "Connection Error"),
+                    onerror: (e: any) => {
+                        console.error("Session error:", e);
+                        this.onError(e.message || "Connection Error");
+                    },
                 }
             };
 
-            this.session = await this.ai.live.connect(config);
+            // 5. Connect & Store Promise
+            this.connectionPromise = this.ai.live.connect(config);
 
         } catch (e: any) {
             this.onError(e.message);
@@ -92,42 +119,53 @@ export class LiveService {
         this.onStateChange(EyeState.LISTENING);
 
         // Start Streaming Input
-        LiveAudioStream.on('data', (data) => {
-            // 'data' is a base64 string of PCM
-            if (this.session) {
-                this.session.sendRealtimeInput({
-                    media: {
-                        mimeType: "audio/pcm;rate=16000",
-                        data: data
-                    }
-                });
+        this.streamSubscription = (LiveAudioStream as any).on('data', (data: string) => {
+            if (this.connectionPromise) {
+                const volume = this.calculateVolume(data);
 
-                // Simple volume calc for UI
-                this.calculateVolume(data);
+                // Noise Gate Logic
+                // High sensitivity (2.0) -> Low Threshold (0) -> Pass everything
+                // Low sensitivity (0.5) -> High Threshold (15) -> Pass only loud sounds
+                // Default 1.5 -> Threshold 5
+                const threshold = (2.0 - this.voiceSensitivity) * 10;
+
+                if (volume > threshold) {
+                    this.connectionPromise.then((session) => {
+                        session.sendRealtimeInput({
+                            media: {
+                                mimeType: "audio/pcm;rate=16000",
+                                data: data
+                            }
+                        });
+                    }).catch(e => console.warn("Failed to send audio chunk", e));
+                }
             }
         });
         LiveAudioStream.start();
     }
 
-    private calculateVolume(base64: string) {
-        // Crude RMS calculation for visualization
-        // Taking a subset to save CPU
-        const buffer = Buffer.from(base64, 'base64');
-        let sum = 0;
-        const step = 4;
-        // Buffer trong Node/RN truy cập bằng index như mảng byte
-        for (let i = 0; i < buffer.length; i += step) {
-            const byte = buffer[i];
-            // Lưu ý: PCM 16bit là 2 bytes, tính toán trên 1 byte chỉ là ước lượng biên độ
-            sum += byte * byte;
+    private calculateVolume(base64: string): number {
+        try {
+            const raw = atob(base64);
+            let sum = 0;
+            // Optimization: Sample every 4th byte to reduce CPU load
+            const length = raw.length;
+            for (let i = 0; i < length; i += 4) {
+                const char = raw.charCodeAt(i);
+                sum += char * char;
+            }
+            const rms = Math.sqrt(sum / (length / 4));
+            // Normalize 0-100 roughly
+            const normalized = Math.min(Math.max(rms / 2, 0), 100);
+            this.onVolumeChange(normalized);
+            return normalized;
+        } catch (e) {
+            return 0;
         }
-        const rms = Math.sqrt(sum / (raw.length / step));
-        const normalized = Math.min(Math.max(rms / 10, 0), 100);
-        this.onVolumeChange(normalized);
     }
 
     private async handleMessage(message: LiveServerMessage) {
-        // 1. Transcriptions
+        // 1. Handle Transcriptions
         if (message.serverContent?.outputTranscription) {
             this.currentOutputTranscription += message.serverContent.outputTranscription.text;
             this.onTranscript(this.currentOutputTranscription, false, false);
@@ -136,6 +174,7 @@ export class LiveService {
             this.onTranscript(this.currentInputTranscription, true, false);
         }
 
+        // 2. Turn Complete (Flush transcripts)
         if (message.serverContent?.turnComplete) {
             if (this.currentInputTranscription) {
                 this.onTranscript(this.currentInputTranscription, true, true);
@@ -146,56 +185,67 @@ export class LiveService {
                 this.currentOutputTranscription = '';
             }
 
+            // If no audio is playing and queue is empty, return to listening state
             if (!this.isPlaying && this.audioQueue.length === 0) {
                 this.onStateChange(EyeState.LISTENING);
             }
         }
 
-        // 2. Interruption handling (VAD from Server)
+        // 3. Interruption Handling (Server detected user speech)
         if (message.serverContent?.interrupted) {
-            console.log("Interrupted by server/user");
+            console.log("Interruption detected");
             await this.stopAudio();
-            this.audioQueue = []; // Clear queue
+            this.audioQueue = [];
             this.onStateChange(EyeState.LISTENING);
             return;
         }
 
-        // 3. Audio Output
+        // 4. Process Audio Output
         const audioData = message.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
         if (audioData) {
             this.queueAudio(audioData);
         }
     }
 
-    // --- AUDIO PLAYBACK (Memory/Stream Optimized) ---
+    // --- OPTIMIZED AUDIO PLAYBACK ---
 
     private queueAudio(base64Pcm: string) {
         this.audioQueue.push(base64Pcm);
+
+        // If nothing is playing, start immediately
         if (!this.isPlaying) {
             this.playNextChunk();
         } else {
-            // Try to pre-load next chunk if we have one and no nextSound
+            // If playing, try to prepare the next one in background
             this.preloadNext();
         }
     }
 
     private async preloadNext() {
+        // Only preload if we don't have a next sound ready and we have data
         if (this.nextSound || this.audioQueue.length === 0) return;
 
-        const pcm = this.audioQueue[0]; // Peek
         try {
-            const wavHeader = wrapPcmWithWav(pcm, 24000); // Gemini output is 24k
+            const pcm = this.audioQueue[0];
+            const wavHeader = wrapPcmWithWav(pcm, 24000);
             const uri = `data:audio/wav;base64,${wavHeader}`;
-            const { sound } = await Audio.Sound.createAsync({ uri });
+
+            // Create but don't play yet
+            const { sound } = await Audio.Sound.createAsync(
+                { uri },
+                { shouldPlay: false }
+            );
             this.nextSound = sound;
         } catch (e) {
-            console.log("Preload failed", e);
+            console.warn("Preload error:", e);
         }
     }
 
     private async playNextChunk() {
         if (this.audioQueue.length === 0) {
             this.isPlaying = false;
+            // Only switch to Listening if we aren't waiting for more thinking data
+            // But for now, we assume if queue is empty, we are done speaking
             this.onStateChange(EyeState.LISTENING);
             return;
         }
@@ -203,18 +253,16 @@ export class LiveService {
         this.isPlaying = true;
         this.onStateChange(EyeState.SPEAKING);
 
+        let soundToPlay: Audio.Sound | null = null;
+        const pcm = this.audioQueue.shift()!; // Consume data
+
         try {
-            // Use preloaded sound if available, otherwise create it
-            let soundToPlay: Audio.Sound;
-
-            // Remove current chunk from queue
-            const pcm = this.audioQueue.shift();
-
+            // Strategy: Use preloaded sound OR create new one
             if (this.nextSound) {
                 soundToPlay = this.nextSound;
                 this.nextSound = null;
             } else {
-                const wavHeader = wrapPcmWithWav(pcm!, 24000);
+                const wavHeader = wrapPcmWithWav(pcm, 24000);
                 const uri = `data:audio/wav;base64,${wavHeader}`;
                 const { sound } = await Audio.Sound.createAsync({ uri });
                 soundToPlay = sound;
@@ -222,13 +270,16 @@ export class LiveService {
 
             this.currentSound = soundToPlay;
 
-            // Trigger preload for the *next* one while this plays
+            // Start preloading the *next* chunk immediately while this one starts
             this.preloadNext();
 
+            // Setup completion listener
             soundToPlay.setOnPlaybackStatusUpdate(async (status) => {
                 if (status.isLoaded && status.didJustFinish) {
-                    await soundToPlay.unloadAsync();
+                    // Cleanup immediately
+                    await soundToPlay?.unloadAsync();
                     this.currentSound = null;
+                    // Loop
                     this.playNextChunk();
                 }
             });
@@ -238,16 +289,21 @@ export class LiveService {
         } catch (e) {
             console.error("Playback error", e);
             this.isPlaying = false;
-            this.playNextChunk();
+            this.playNextChunk(); // Skip bad chunk
         }
     }
 
     private async stopAudio() {
         this.isPlaying = false;
+
         if (this.currentSound) {
-            try { await this.currentSound.stopAsync(); await this.currentSound.unloadAsync(); } catch { }
+            try {
+                await this.currentSound.stopAsync();
+                await this.currentSound.unloadAsync();
+            } catch { }
             this.currentSound = null;
         }
+
         if (this.nextSound) {
             try { await this.nextSound.unloadAsync(); } catch { }
             this.nextSound = null;
@@ -256,14 +312,28 @@ export class LiveService {
 
     public cleanup() {
         this.onStateChange(EyeState.IDLE);
-        LiveAudioStream.stop();
-        LiveAudioStream.removeAllListeners();
+
+        try {
+            LiveAudioStream.stop();
+        } catch { }
+
+        if (this.streamSubscription) {
+            // Safe check for remove method
+            if (typeof this.streamSubscription.remove === 'function') {
+                this.streamSubscription.remove();
+            }
+            this.streamSubscription = null;
+        }
+
         this.stopAudio();
 
-        if (this.session) {
-            try { this.session.close(); } catch { }
+        // Close session properly
+        if (this.connectionPromise) {
+            this.connectionPromise.then(session => {
+                try { session.close(); } catch { }
+            });
+            this.connectionPromise = null;
         }
-        this.session = null;
     }
 
     public disconnect() {
