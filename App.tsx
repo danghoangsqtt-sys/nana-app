@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
-import { View, Text, StatusBar, TouchableOpacity, Platform } from 'react-native';
+import { View, Text, StatusBar, TouchableOpacity, Alert } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { LinearGradient } from 'expo-linear-gradient';
+import Constants from 'expo-constants';
 import { useGeminiLive } from './hooks/useGeminiLive';
 import Eyes from './components/Eyes';
 import Mouth from './components/Mouth';
@@ -10,6 +11,8 @@ import SettingsModal from './components/SettingsModal';
 import { UserSettings, EyeState, Emotion } from './types';
 import { Sparkles, Settings2 } from 'lucide-react-native';
 
+const API_KEY = Constants.expoConfig?.extra?.geminiApiKey || '';
+
 const DEFAULT_SETTINGS: UserSettings = {
     userName: 'Owner',
     systemInstruction: 'You are NaNa, a helpful, witty, and concise AI assistant.',
@@ -17,7 +20,7 @@ const DEFAULT_SETTINGS: UserSettings = {
     language: 'en',
     translationLangA: 'vi',
     translationLangB: 'en',
-    apiKey: 'AIzaSyDZiOlUqiVZehmx7UMcR5lcOKiHRim8qAI',
+    apiKey: API_KEY,
     voiceSensitivity: 1.5,
 };
 
@@ -43,7 +46,18 @@ const App: React.FC = () => {
         return () => clearInterval(timer);
     }, []);
 
+    useEffect(() => {
+        if (error) {
+            Alert.alert("Connection Error", error);
+        }
+    }, [error]);
+
     const handleToggle = () => {
+        if (!settings.apiKey) {
+            Alert.alert("Configuration Missing", "Please add your Gemini API Key in the settings or .env file.");
+            setShowSettings(true);
+            return;
+        }
         if (active) disconnect();
         else connect();
     };
@@ -96,12 +110,6 @@ const App: React.FC = () => {
                                 {active ? (state === EyeState.LISTENING ? "Listening" : state) : "Standby"}
                             </Text>
                         </View>
-
-                        {error && (
-                            <View className="mt-4 bg-red-900/50 px-4 py-2 rounded-lg border border-red-500/30">
-                                <Text className="text-red-200 text-xs font-medium">{error}</Text>
-                            </View>
-                        )}
                     </View>
 
                     {/* Transcript Area */}

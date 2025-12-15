@@ -1,48 +1,24 @@
 import { GoogleGenAI, LiveServerMessage, Modality } from "@google/genai";
 import { Audio } from 'expo-av';
-import * as FileSystem from 'expo-file-system';
-import { UserSettings, EyeState, Emotion, UserLocation, AppMode } from "../types";
+import LiveAudioStream from 'react-native-live-audio-stream';
+import { UserSettings, EyeState, UserLocation, AppMode } from "../types";
 import { wrapPcmWithWav } from "../utils/audioUtils";
 
-// Thresholds
-const VAD_THRESHOLD_DB = -45; // Amplitude threshold to consider as speech (silence is usually < -60dB)
-const CHUNK_DURATION_MS = 600; // Duration of each recording chunk
-
-const RECORDING_OPTIONS: any = {
-    android: {
-        extension: '.wav',
-        outputFormat: Audio.AndroidOutputFormat.DEFAULT,
-        audioEncoder: Audio.AndroidAudioEncoder.DEFAULT,
-        sampleRate: 16000,
-        numberOfChannels: 1,
-        bitRate: 256000,
-    },
-    ios: {
-        extension: '.wav',
-        audioQuality: Audio.IOSAudioQuality.HIGH,
-        sampleRate: 16000,
-        numberOfChannels: 1,
-        bitRateStrategy: Audio.IOSBitRateStrategy.CONSTANT,
-        linearPCMBitDepth: 16,
-        linearPCMIsBigEndian: false,
-        linearPCMIsFloat: false,
-    },
-    web: {}
-};
+// Audio Config
+const SAMPLE_RATE = 16000;
+const CHANNELS = 1;
+const BIT_DEPTH = 16;
+const BUFFER_SIZE = 2048; // Size of emitted chunks
 
 export class LiveService {
     private ai: GoogleGenAI;
     private session: any = null;
-    private sessionPromise: Promise<any> | null = null;
 
     // Audio Playback
-    private playbackQueue: string[] = [];
     private isPlaying = false;
+    private audioQueue: string[] = []; // Queue of base64 PCM chunks
     private currentSound: Audio.Sound | null = null;
-
-    // Audio Recording
-    private recording: Audio.Recording | null = null;
-    private isRecording = false;
+    private nextSound: Audio.Sound | null = null; // Pre-loaded sound
 
     // State Management
     public onStateChange: (state: EyeState) => void = () => { };
@@ -61,7 +37,6 @@ export class LiveService {
 
     async connect(settings: UserSettings, location: UserLocation | null, mode: AppMode) {
         try {
-            // Important: Enable playsInSilentModeIOS and allowsRecordingIOS for Duplex audio (Talk & Listen same time)
             await Audio.setAudioModeAsync({
                 allowsRecordingIOS: true,
                 playsInSilentModeIOS: true,
@@ -70,32 +45,40 @@ export class LiveService {
                 playThroughEarpieceAndroid: false,
             });
 
+            // Initialize Input Stream
+            const options = {
+                sampleRate: SAMPLE_RATE,
+                channels: CHANNELS,
+                bitsPerSample: BIT_DEPTH,
+                audioSource: 6, // Voice Recognition
+                bufferSize: BUFFER_SIZE,
+            };
+            LiveAudioStream.init(options);
+
+            // Gemini Config
             const config: any = {
                 model: 'gemini-2.5-flash-native-audio-preview-09-2025',
                 config: {
                     responseModalities: [Modality.AUDIO],
                     inputAudioTranscription: { model: "google-1.0-pro-en" },
                     outputAudioTranscription: { model: "google-1.0-pro-en" },
-                    systemInstruction: settings.systemInstruction || "You are NaNa, a helpful AI assistant. Answer briefly.",
+                    systemInstruction: settings.systemInstruction || "You are NaNa.",
                     speechConfig: {
-                        voiceConfig: {
-                            prebuiltVoiceConfig: { voiceName: 'Zephyr' }
-                        }
+                        voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Zephyr' } }
                     },
                 },
                 callbacks: {
                     onopen: this.handleOpen.bind(this),
                     onmessage: this.handleMessage.bind(this),
                     onclose: () => {
-                        this.onStateChange(EyeState.IDLE);
+                        this.cleanup();
                         this.onDisconnect();
                     },
                     onerror: (e: any) => this.onError(e.message || "Connection Error"),
                 }
             };
 
-            this.sessionPromise = this.ai.live.connect(config);
-            this.session = await this.sessionPromise;
+            this.session = await this.ai.live.connect(config);
 
         } catch (e: any) {
             this.onError(e.message);
@@ -106,18 +89,47 @@ export class LiveService {
     private handleOpen() {
         console.log("Connected to Gemini Live");
         this.onStateChange(EyeState.LISTENING);
-        this.startSmartRecording();
+
+        // Start Streaming Input
+        LiveAudioStream.on('data', (data) => {
+            // 'data' is a base64 string of PCM
+            if (this.session) {
+                this.session.sendRealtimeInput({
+                    media: {
+                        mimeType: "audio/pcm;rate=16000",
+                        data: data
+                    }
+                });
+
+                // Simple volume calc for UI
+                this.calculateVolume(data);
+            }
+        });
+        LiveAudioStream.start();
+    }
+
+    private calculateVolume(base64: string) {
+        // Crude RMS calculation for visualization
+        // Taking a subset to save CPU
+        const raw = atob(base64);
+        let sum = 0;
+        const step = 4; // Skip bytes for speed
+        for (let i = 0; i < raw.length; i += step) {
+            const char = raw.charCodeAt(i);
+            sum += char * char;
+        }
+        const rms = Math.sqrt(sum / (raw.length / step));
+        const normalized = Math.min(Math.max(rms / 10, 0), 100);
+        this.onVolumeChange(normalized);
     }
 
     private async handleMessage(message: LiveServerMessage) {
-        // 1. Handle Transcriptions
+        // 1. Transcriptions
         if (message.serverContent?.outputTranscription) {
-            const text = message.serverContent.outputTranscription.text;
-            this.currentOutputTranscription += text;
+            this.currentOutputTranscription += message.serverContent.outputTranscription.text;
             this.onTranscript(this.currentOutputTranscription, false, false);
         } else if (message.serverContent?.inputTranscription) {
-            const text = message.serverContent.inputTranscription.text;
-            this.currentInputTranscription += text;
+            this.currentInputTranscription += message.serverContent.inputTranscription.text;
             this.onTranscript(this.currentInputTranscription, true, false);
         }
 
@@ -131,30 +143,55 @@ export class LiveService {
                 this.currentOutputTranscription = '';
             }
 
-            // Return to listening state only if queue is empty
-            if (this.playbackQueue.length === 0 && !this.isPlaying) {
+            if (!this.isPlaying && this.audioQueue.length === 0) {
                 this.onStateChange(EyeState.LISTENING);
             }
         }
 
-        // 2. Handle Audio Output
+        // 2. Interruption handling (VAD from Server)
+        if (message.serverContent?.interrupted) {
+            console.log("Interrupted by server/user");
+            await this.stopAudio();
+            this.audioQueue = []; // Clear queue
+            this.onStateChange(EyeState.LISTENING);
+            return;
+        }
+
+        // 3. Audio Output
         const audioData = message.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
         if (audioData) {
             this.queueAudio(audioData);
         }
     }
 
-    // --- AUDIO OUTPUT (PLAYBACK) ---
+    // --- AUDIO PLAYBACK (Memory/Stream Optimized) ---
 
     private queueAudio(base64Pcm: string) {
-        this.playbackQueue.push(base64Pcm);
+        this.audioQueue.push(base64Pcm);
         if (!this.isPlaying) {
             this.playNextChunk();
+        } else {
+            // Try to pre-load next chunk if we have one and no nextSound
+            this.preloadNext();
+        }
+    }
+
+    private async preloadNext() {
+        if (this.nextSound || this.audioQueue.length === 0) return;
+
+        const pcm = this.audioQueue[0]; // Peek
+        try {
+            const wavHeader = wrapPcmWithWav(pcm, 24000); // Gemini output is 24k
+            const uri = `data:audio/wav;base64,${wavHeader}`;
+            const { sound } = await Audio.Sound.createAsync({ uri });
+            this.nextSound = sound;
+        } catch (e) {
+            console.log("Preload failed", e);
         }
     }
 
     private async playNextChunk() {
-        if (this.playbackQueue.length === 0) {
+        if (this.audioQueue.length === 0) {
             this.isPlaying = false;
             this.onStateChange(EyeState.LISTENING);
             return;
@@ -163,145 +200,70 @@ export class LiveService {
         this.isPlaying = true;
         this.onStateChange(EyeState.SPEAKING);
 
-        const pcmChunk = this.playbackQueue.shift();
-        if (!pcmChunk) return;
-
         try {
-            const wavBase64 = wrapPcmWithWav(pcmChunk, 24000);
-            const cacheDir = (FileSystem as any).cacheDirectory;
-            const filename = `${cacheDir}play_${Date.now()}.wav`;
+            // Use preloaded sound if available, otherwise create it
+            let soundToPlay: Audio.Sound;
 
-            await FileSystem.writeAsStringAsync(filename, wavBase64, { encoding: 'base64' });
+            // Remove current chunk from queue
+            const pcm = this.audioQueue.shift();
 
-            const { sound } = await Audio.Sound.createAsync({ uri: filename });
-            this.currentSound = sound;
+            if (this.nextSound) {
+                soundToPlay = this.nextSound;
+                this.nextSound = null;
+            } else {
+                const wavHeader = wrapPcmWithWav(pcm!, 24000);
+                const uri = `data:audio/wav;base64,${wavHeader}`;
+                const { sound } = await Audio.Sound.createAsync({ uri });
+                soundToPlay = sound;
+            }
 
-            sound.setOnPlaybackStatusUpdate(async (status) => {
+            this.currentSound = soundToPlay;
+
+            // Trigger preload for the *next* one while this plays
+            this.preloadNext();
+
+            soundToPlay.setOnPlaybackStatusUpdate(async (status) => {
                 if (status.isLoaded && status.didJustFinish) {
-                    await sound.unloadAsync();
-                    await FileSystem.deleteAsync(filename, { idempotent: true });
+                    await soundToPlay.unloadAsync();
+                    this.currentSound = null;
                     this.playNextChunk();
                 }
             });
 
-            await sound.playAsync();
+            await soundToPlay.playAsync();
 
         } catch (e) {
             console.error("Playback error", e);
             this.isPlaying = false;
-            this.playNextChunk(); // Try next chunk
+            this.playNextChunk();
         }
     }
 
-    /**
-     * Immediately stops audio playback and clears queue.
-     * Called when VAD detects user speech (Barge-in).
-     */
     private async stopAudio() {
         this.isPlaying = false;
-        this.playbackQueue = []; // Clear queue
-
         if (this.currentSound) {
-            try {
-                await this.currentSound.stopAsync();
-                await this.currentSound.unloadAsync();
-            } catch (e) {
-                // Ignore errors during stop/unload
-            }
+            try { await this.currentSound.stopAsync(); await this.currentSound.unloadAsync(); } catch { }
             this.currentSound = null;
         }
-        this.onStateChange(EyeState.LISTENING);
+        if (this.nextSound) {
+            try { await this.nextSound.unloadAsync(); } catch { }
+            this.nextSound = null;
+        }
     }
 
-    // --- AUDIO INPUT (SMART RECORDING) ---
-
-    private async startSmartRecording() {
-        this.isRecording = true;
-
-        const recordLoop = async () => {
-            if (!this.isRecording) return;
-
-            let maxAmplitude = -160; // Initialize with silence (dB)
-
-            try {
-                const recording = new Audio.Recording();
-                await recording.prepareToRecordAsync({
-                    ...RECORDING_OPTIONS,
-                    isMeteringEnabled: true // Critical for VAD
-                });
-
-                recording.setOnRecordingStatusUpdate((status) => {
-                    // Update visual volume
-                    if (status.metering !== undefined) {
-                        const normalizedVol = (status.metering + 160) / 1.6;
-                        this.onVolumeChange(normalizedVol);
-
-                        // Track max volume for VAD
-                        if (status.metering > maxAmplitude) {
-                            maxAmplitude = status.metering;
-                        }
-                    }
-                });
-
-                await recording.startAsync();
-                this.recording = recording;
-
-                // Record for a short chunk
-                await new Promise(resolve => setTimeout(resolve, CHUNK_DURATION_MS));
-
-                // Stop recording
-                await recording.stopAndUnloadAsync();
-                const uri = recording.getURI();
-
-                // --- VAD LOGIC ---
-                if (maxAmplitude > VAD_THRESHOLD_DB) {
-                    // Voice Detected!
-
-                    // 1. Barge-in Check: If AI is speaking, SHUT IT UP.
-                    if (this.isPlaying) {
-                        console.log("Barge-in detected! Stopping audio.");
-                        await this.stopAudio();
-                    }
-
-                    // 2. Send Data
-                    if (uri && this.session) {
-                        // Only read file IO if VAD passed
-                        const base64 = await FileSystem.readAsStringAsync(uri, { encoding: 'base64' });
-                        this.session.sendRealtimeInput({ media: { mimeType: "audio/wav", data: base64 } });
-                    }
-                } else {
-                    // Silence detected. Do nothing. Saves Bandwidth & Processing.
-                }
-
-                // Cleanup file
-                if (uri) {
-                    await FileSystem.deleteAsync(uri, { idempotent: true });
-                }
-
-            } catch (e) {
-                console.error("Recording loop error", e);
-                // Prevent fast loop crashing on error
-                await new Promise(resolve => setTimeout(resolve, 500));
-            }
-
-            // Continue loop
-            if (this.isRecording) {
-                recordLoop();
-            }
-        };
-
-        recordLoop();
-    }
-
-    public disconnect() {
-        this.isRecording = false;
-        this.stopAudio(); // Ensure playback stops
+    public cleanup() {
+        this.onStateChange(EyeState.IDLE);
+        LiveAudioStream.stop();
+        LiveAudioStream.removeAllListeners();
+        this.stopAudio();
 
         if (this.session) {
             try { this.session.close(); } catch { }
         }
         this.session = null;
-        this.currentInputTranscription = '';
-        this.currentOutputTranscription = '';
+    }
+
+    public disconnect() {
+        this.cleanup();
     }
 }
