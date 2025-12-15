@@ -1,14 +1,15 @@
+
 export interface UserSettings {
   userName: string;
   systemInstruction: string;
   fileContext: string;
   language: 'vi' | 'en';
-  translationLangA: string; 
-  translationLangB: string; 
-  apiKey?: string; 
-  optimizeLatency?: boolean; 
-  voiceSensitivity: number; 
-  userVoiceSample?: string; 
+  translationLangA: string;
+  translationLangB: string;
+  apiKey?: string;
+  optimizeLatency?: boolean;
+  voiceSensitivity: number;
+  userVoiceSample?: string;
 }
 
 export enum EyeState {
@@ -44,6 +45,11 @@ export interface ChatMessage {
 
 export interface VideoState {
   isOpen: boolean;
+  url: string;
+  title: string;
+}
+
+export interface VideoCommand {
   url: string;
   title: string;
 }

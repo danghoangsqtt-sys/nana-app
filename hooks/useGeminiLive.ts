@@ -1,6 +1,7 @@
+
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { LiveService } from '../services/liveService';
-import { EyeState, UserSettings, UserLocation, ChatMessage, AppMode } from '../types';
+import { EyeState, UserSettings, UserLocation, ChatMessage, AppMode, VideoCommand } from '../types';
 
 export const useGeminiLive = (settings: UserSettings, location: UserLocation | null, mode: AppMode) => {
   const [state, setState] = useState<EyeState>(EyeState.IDLE);
@@ -12,6 +13,11 @@ export const useGeminiLive = (settings: UserSettings, location: UserLocation | n
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [currentTranscript, setCurrentTranscript] = useState<string>('');
   const [isUserSpeaking, setIsUserSpeaking] = useState(false);
+
+  // Tool States (Exposed to App)
+  const [videoCommand, setVideoCommand] = useState<VideoCommand | null>(null);
+  const [openSettingsRequest, setOpenSettingsRequest] = useState(0); // Increment to trigger
+  const [sleepRequest, setSleepRequest] = useState(0);
 
   const serviceRef = useRef<LiveService | null>(null);
 
@@ -28,6 +34,7 @@ export const useGeminiLive = (settings: UserSettings, location: UserLocation | n
 
     const service = new LiveService(effectiveApiKey);
 
+    // Standard Callbacks
     service.onStateChange = (s) => setState(s);
     service.onVolumeChange = (v) => setVolume(v);
     service.onError = (msg) => setError(msg);
@@ -55,6 +62,11 @@ export const useGeminiLive = (settings: UserSettings, location: UserLocation | n
       }
     };
 
+    // Tool Callbacks
+    service.onVideoCommand = (cmd) => setVideoCommand(cmd);
+    service.onSettingsCommand = () => setOpenSettingsRequest(prev => prev + 1);
+    service.onSleepCommand = () => setSleepRequest(prev => prev + 1);
+
     // Pass the mode to the service
     service.connect(settings, location, mode);
     serviceRef.current = service;
@@ -72,9 +84,7 @@ export const useGeminiLive = (settings: UserSettings, location: UserLocation | n
   }, []);
 
   useEffect(() => {
-    // If mode changes while active, we need to reconnect (optional, or just disconnect)
-    // For now, we rely on the parent to call connect() again if they want to switch context.
-    // But if unmounting, we always disconnect.
+    // Cleanup on unmount
     return () => disconnect();
   }, [disconnect]);
 
@@ -87,6 +97,10 @@ export const useGeminiLive = (settings: UserSettings, location: UserLocation | n
     error,
     messages,
     currentTranscript,
-    isUserSpeaking
+    isUserSpeaking,
+    videoCommand,
+    openSettingsRequest,
+    sleepRequest,
+    clearVideoCommand: () => setVideoCommand(null)
   };
 };

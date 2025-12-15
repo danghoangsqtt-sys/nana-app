@@ -1,17 +1,23 @@
-import React, { useState, useEffect } from 'react';
-import { View, Text, StatusBar, TouchableOpacity, Alert } from 'react-native';
+
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { View, Text, StatusBar, TouchableOpacity, Alert, Linking, AppState } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { LinearGradient } from 'expo-linear-gradient';
 import Constants from 'expo-constants';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useGeminiLive } from './hooks/useGeminiLive';
 import Eyes from './components/Eyes';
 import Mouth from './components/Mouth';
 import TranscriptView from './components/TranscriptView';
 import SettingsModal from './components/SettingsModal';
-import { UserSettings, EyeState, Emotion, AppMode } from './types';
-import { Sparkles, Settings2, Languages, Mic, MicOff } from 'lucide-react-native';
+import Sidebar from './components/Sidebar';
+import VideoPlayer from './components/VideoPlayer';
+import { UserSettings, EyeState, Emotion, AppMode, ChatSession, VideoState } from './types';
+import { Sparkles, Settings2, Languages, Mic, MicOff, Play, X, PanelLeftOpen } from 'lucide-react-native';
+import Animated, { SlideInDown, SlideOutDown } from 'react-native-reanimated';
 
 const API_KEY = Constants.expoConfig?.extra?.geminiApiKey || '';
+const STORAGE_KEY = 'chat_sessions_v1';
 
 const DEFAULT_SETTINGS: UserSettings = {
     userName: 'Owner',
@@ -27,8 +33,15 @@ const DEFAULT_SETTINGS: UserSettings = {
 const App: React.FC = () => {
     const [settings, setSettings] = useState<UserSettings>(DEFAULT_SETTINGS);
     const [showSettings, setShowSettings] = useState(false);
+    const [showSidebar, setShowSidebar] = useState(false);
     const [currentTime, setCurrentTime] = useState(new Date());
     const [mode, setMode] = useState<AppMode>('assistant');
+
+    // Session Management
+    const [currentSession, setCurrentSession] = useState<ChatSession | null>(null);
+
+    // Video State for Modal
+    const [videoState, setVideoState] = useState<VideoState>({ isOpen: false, url: '', title: '' });
 
     const {
         state,
@@ -39,19 +52,132 @@ const App: React.FC = () => {
         error,
         messages,
         currentTranscript,
-        isUserSpeaking
+        isUserSpeaking,
+        videoCommand,
+        openSettingsRequest,
+        sleepRequest,
+        clearVideoCommand
     } = useGeminiLive(settings, null, mode);
 
+    // --- Session Initialization ---
+    useEffect(() => {
+        initializeSession();
+    }, []);
+
+    const initializeSession = async () => {
+        try {
+            const json = await AsyncStorage.getItem(STORAGE_KEY);
+            if (json) {
+                const sessions: ChatSession[] = JSON.parse(json);
+                if (sessions.length > 0) {
+                    // Load most recent
+                    sessions.sort((a, b) => b.updatedAt - a.updatedAt);
+                    setCurrentSession(sessions[0]);
+                } else {
+                    createDefaultSession();
+                }
+            } else {
+                createDefaultSession();
+            }
+        } catch {
+            createDefaultSession();
+        }
+    };
+
+    const createDefaultSession = () => {
+        const newSession: ChatSession = {
+            id: Date.now().toString(),
+            title: 'New Conversation',
+            messages: [],
+            updatedAt: Date.now()
+        };
+        setCurrentSession(newSession);
+    };
+
+    // --- Auto-Save Chat History ---
+    // We sync the 'live' messages from the hook into the 'currentSession' object and persist it.
+    useEffect(() => {
+        if (currentSession && messages.length > 0) {
+            // Only save if we have new messages compared to what's in session
+            if (messages.length !== currentSession.messages.length) {
+                const updatedSession = {
+                    ...currentSession,
+                    messages: messages,
+                    updatedAt: Date.now(),
+                    // Auto-title based on first user message if title is default
+                    title: (currentSession.title === 'New Conversation' && messages.find(m => m.role === 'user'))
+                        ? messages.find(m => m.role === 'user')?.text.substring(0, 30) || 'New Conversation'
+                        : currentSession.title
+                };
+                setCurrentSession(updatedSession);
+                saveSessionToStorage(updatedSession);
+            }
+        }
+    }, [messages]);
+
+    const saveSessionToStorage = async (session: ChatSession) => {
+        try {
+            const json = await AsyncStorage.getItem(STORAGE_KEY);
+            let sessions: ChatSession[] = json ? JSON.parse(json) : [];
+            // Update existing or Add new
+            const index = sessions.findIndex(s => s.id === session.id);
+            if (index >= 0) {
+                sessions[index] = session;
+            } else {
+                sessions.unshift(session);
+            }
+            await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(sessions));
+        } catch (e) {
+            console.warn("Failed to save session", e);
+        }
+    };
+
+    const handleSelectSession = (session: ChatSession) => {
+        // Disconnect current live session to reset state
+        if (active) disconnect();
+
+        setCurrentSession(session);
+        // In a real production app, you would pass `session.messages` to the `useGeminiLive` hook 
+        // to initialize the conversation context. For now, selecting a session views the history,
+        // and starting the mic starts a fresh context visually appended to it.
+    };
+
+    // --- Clock ---
     useEffect(() => {
         const timer = setInterval(() => setCurrentTime(new Date()), 1000);
         return () => clearInterval(timer);
     }, []);
 
+    // --- Error Handling ---
     useEffect(() => {
         if (error) {
             Alert.alert("Connection Error", error);
         }
     }, [error]);
+
+    // --- Tool Triggers ---
+    useEffect(() => {
+        if (openSettingsRequest > 0) setShowSettings(true);
+    }, [openSettingsRequest]);
+
+    useEffect(() => {
+        if (sleepRequest > 0) {
+            disconnect();
+            Alert.alert("NaNa", "Going to sleep now. Press the Mic to wake me up.");
+        }
+    }, [sleepRequest, disconnect]);
+
+    // --- Video Command Handling ---
+    useEffect(() => {
+        if (videoCommand) {
+            setVideoState({
+                isOpen: true,
+                url: videoCommand.url,
+                title: videoCommand.title
+            });
+            clearVideoCommand();
+        }
+    }, [videoCommand]);
 
     const handleToggle = () => {
         if (!settings.apiKey) {
@@ -94,13 +220,18 @@ const App: React.FC = () => {
 
                     {/* Header */}
                     <View className="flex-row justify-between items-center px-6 mt-2">
-                        <View>
-                            <Text className="text-white text-4xl font-thin tracking-[3px]">
-                                {hours}<Text className={themeColor}>:</Text>{minutes}
-                            </Text>
-                            <Text className="text-white/50 text-xs uppercase tracking-[5px]">
-                                {isTranslator ? "TRANSLATOR" : "NaNa AI"}
-                            </Text>
+                        <View className="flex-row items-center gap-4">
+                            <TouchableOpacity onPress={() => setShowSidebar(true)} className="p-2 -ml-2">
+                                <PanelLeftOpen size={28} color="white" />
+                            </TouchableOpacity>
+                            <View>
+                                <Text className="text-white text-4xl font-thin tracking-[3px]">
+                                    {hours}<Text className={themeColor}>:</Text>{minutes}
+                                </Text>
+                                <Text className="text-white/50 text-xs uppercase tracking-[5px]">
+                                    {isTranslator ? "TRANSLATOR" : "NaNa AI"}
+                                </Text>
+                            </View>
                         </View>
                         <View className="flex-row gap-3">
                             <TouchableOpacity
@@ -139,7 +270,7 @@ const App: React.FC = () => {
                     {/* Transcript & Controls */}
                     <View className="h-1/3 w-full justify-end pb-6">
                         <TranscriptView
-                            messages={messages}
+                            messages={active ? messages : (currentSession?.messages || [])}
                             currentTranscript={currentTranscript}
                             isUserSpeaking={isUserSpeaking}
                         />
@@ -154,11 +285,24 @@ const App: React.FC = () => {
                         </View>
                     </View>
 
+                    {/* Modals */}
                     <SettingsModal
                         visible={showSettings}
                         onClose={() => setShowSettings(false)}
                         settings={settings}
                         onSave={setSettings}
+                    />
+
+                    <Sidebar
+                        isOpen={showSidebar}
+                        onClose={() => setShowSidebar(false)}
+                        onSelectSession={handleSelectSession}
+                        currentSessionId={currentSession?.id}
+                    />
+
+                    <VideoPlayer
+                        state={videoState}
+                        onClose={() => setVideoState(prev => ({ ...prev, isOpen: false }))}
                     />
 
                 </SafeAreaView>
