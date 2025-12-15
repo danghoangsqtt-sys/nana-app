@@ -99,14 +99,14 @@ export const createWavHeader = (dataLength: number, sampleRate: number = 24000, 
  * Wraps raw PCM16 Base64 audio with a WAV header so Expo can play it.
  */
 export const wrapPcmWithWav = (pcmBase64: string, sampleRate: number = 24000) => {
-    // Base64 length to byte length formula
-    const byteLength = (pcmBase64.length * 3) / 4 - (pcmBase64.indexOf('=') > 0 ? (pcmBase64.length - pcmBase64.indexOf('=')) : 0);
-    const headerBase64 = createWavHeader(byteLength, sampleRate);
-    return headerBase64 + pcmBase64;
+  // Base64 length to byte length formula
+  const byteLength = (pcmBase64.length * 3) / 4 - (pcmBase64.indexOf('=') > 0 ? (pcmBase64.length - pcmBase64.indexOf('=')) : 0);
+  const headerBase64 = createWavHeader(byteLength, sampleRate);
+  return headerBase64 + pcmBase64;
 };
 
 // Inject polyfills globally if needed
-if (typeof global !== 'undefined') {
-    if (!global.atob) global.atob = atob;
-    if (!global.btoa) global.btoa = btoa;
+if (typeof globalThis !== 'undefined') {
+  if (!(globalThis as any).atob) (globalThis as any).atob = atob;
+  if (!(globalThis as any).btoa) (globalThis as any).btoa = btoa;
 }
